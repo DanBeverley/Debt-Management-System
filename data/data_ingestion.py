@@ -11,7 +11,7 @@ import json
 import logging
 import numpy as np
 import pandas as pd
-from typing import Dict, Union, Optional, List, Tuple
+from typing import Dict, Union, Optional, List, Tuple, Literal
 import warnings
 from pathlib import Path
 import dask.dataframe as dd
@@ -33,9 +33,17 @@ class DataIngestion:
     """
     def __init__(self, config:Optional[Dict] = None) -> None:
         """
+        Initialize DataIngestion object
+
         :param config: Configuration parameters for data ingestion
         """
         self.config = config or {}
+        expected_keys = {"cache_dir": str, "sample_size":int , "use_dask":bool, "use_parquet":bool, "chunk_size":int}
+        for key, value in self.config.items():
+            if key not in expected_keys:
+                logger.warning(f"Unexpected config key: {key}")
+            elif not isinstance(value, expected_keys.get(key, object)):
+                raise ValueError(f"Invalid type for {key}: expected {expected_keys[key]}, got {type(value)}")
         self.cache_dir  = self.config.get("cache_dir", "data/cache")
         self.sample_size = self.config.get("sample_size", 10000)
         self.use_dask = self.config.get("use_dask", False)
@@ -68,6 +76,9 @@ class DataIngestion:
             raise FileNotFoundError(f"The file {file_path} does not exist")
 
         file_ext = os.path.splitext(file_path)[1].lower()
+        supported_format = {".csv", ".parquet", ".xlsx", ".xls"}
+        if file_ext not in supported_format:
+            raise ValueError(f"Unsupported file format: {file_ext}. Supported formats: {supported_format}")
         try:
             if self.use_dask:
                 logger.info("Using Dask for memory-efficient loading")
@@ -77,23 +88,20 @@ class DataIngestion:
                 elif file_ext == ".parquet":
                     ddf = dd.read_parquet(file_path, columns = columns)
                 else:
-                    raise ValueError(f"Unsupported file format: {file_ext}")
+                    logger.warning(f"Dask does not support {file_ext}. Falling back to pandas")
+                    df = pd.read_excel(file_path, usecols = columns)
+                    return self._cache_and_return(df, cache_file, use_cache)
                 df = ddf.compute()
             else:
                    # Pandas with chunking for larger CSV files
                    if file_ext == ".csv":
                        if os.path.getsize(file_path) > 1_000_000_000: # !GB
                            logger.info(f"Larger file detected ({file_path}), using chunked reading")
-                           chunks = []
-                           with pd.read_csv(file_path,
-                                                         chunksize = self.chunk_size,
-                                                         usecols = columns,
-                                                         low_memory = low_memory) as reader:
-                               for chunk in tqdm(reader, desc = "Loading data chunks"):
-                                    chunks.append(chunk)
+                           chunks = pd.read_csv(file_path, chunksize=self.chunk_size, usecols=columns,
+                                                                low_memory=low_memory, dtype_backend='pyarrow')
                            df = pd.concat(chunks, ignore_index=True)
                        else:
-                           df = pd.read_csv(file_path, usecols = columns, low_memory = low_memory)
+                           df = pd.read_csv(file_path, usecols = columns, low_memory = low_memory, dtype_backend ="pyarrow")
                    elif file_ext == ".parquet":
                        df = pd.read_parquet(file_path, columns = columns)
                    elif file_ext == ".xlsx" or file_ext == ".xls":
@@ -107,16 +115,17 @@ class DataIngestion:
             if df.empty:
                 raise ValueError("The loaded dataset is empty")
             logger.info(f"Loaded {len(df)} rows and {len(df.columns)} columns")
-
-            # Cache the data if requested
-            if use_cache:
-                logger.info(f"Caching data to {cache_file}")
-                df.to_parquet(cache_file, index = False)
-            return df
+            return self._cache_and_return(df, cache_file, use_cache)
 
         except Exception as e:
             logger.error(f"Error loading data: {e}")
             raise
+
+    def _cache_and_return(self, df:pd.DataFrame, cache_file:str, use_cache:bool) -> pd.DataFrame:
+        if use_cache:
+            logger.info(f"Caching data to {cache_file}")
+            df.to_parquet(cache_file, index = False)
+        return df
 
     def load_user_data(self, user_input: Union[Dict, str]) -> dict[str, pd.DataFrame]:
         """
@@ -127,6 +136,8 @@ class DataIngestion:
         """
         logger.info("Processing user input data")
         # Handle string input (JSON)
+        if not isinstance(user_input, (dict, str)):
+            raise TypeError(f"User input must be a dict or str, got {type(user_input)}")
         if isinstance(user_input, str):
             try:
                 user_input = json.loads(user_input)
@@ -138,16 +149,15 @@ class DataIngestion:
         missing_fields = [field for field in required_fields if field not in user_input]
         if missing_fields:
             raise ValueError(f"Missing required fields: {', '.join(missing_fields)}")
-        # Process debts data
-        if isinstance(user_input["debts"], list):
-            debts_df = pd.DataFrame(user_input["debts"])
 
-            required_debt_cols = ['amount', 'interest_rate', 'minimum_payment']
-            missing_cols = [col for col in required_debt_cols if col not in debts_df.columns]
-            if missing_cols:
-                raise ValueError(f"Debt entries missing required fields: {', '.join(missing_cols)}")
-        else:
-            raise ValueError("'debts' must be a list of a debt items")
+        if not isinstance(user_input['debts'], list):
+            raise ValueError("'debts' must be a list of debt items")
+
+        debts_df = pd.DataFrame(user_input['debts'])
+        required_debt_cols = ['amount', 'interest_rate', 'minimum_payment']
+        missing_cols = [col for col in required_debt_cols if col not in debts_df.columns]
+        if missing_cols:
+            raise ValueError(f"Debt entries missing required fields: {', '.join(missing_cols)}")
 
         user_profile = {"income": user_input.get('income'),
                                   "expenses": user_input.get('expenses', 0),
@@ -174,7 +184,11 @@ class DataIngestion:
         logger.info(f"Loading data from database with query: {query[:100]}...")
         try:
             engine = create_engine(connection_string)
-            df = pd.read_sql(query, engine)
+            if self.chunk_size and os.getenv('LARGE_DATASET', 'false').lower() == 'true':
+                chunks = pd.read_sql(query, engine, chunksize=self.chunk_size)
+                df = pd.concat(chunks, ignore_index=True)
+            else:
+                df = pd.read_sql(query, engine)
             logger.info(f"Loaded {len(df)} rows from database")
             return df
         except Exception as e:
@@ -195,13 +209,18 @@ class DataIngestion:
             response = requests.get(api_url, params = params, headers = headers)
             response.raise_for_status()
 
-            data = response.json()
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                raise ValueError("API did not return valid JSON")
+
             if isinstance(data, list):
                 df = pd.DataFrame(data)
-            elif isinstance(data, dict) and "results" in data:
-                df = pd.DataFrame(data["results"])
+            elif isinstance(data, dict):
+                df = pd.DataFrame(data.get('results', [data]))
             else:
-                df = pd.DataFrame([data])
+                raise ValueError(f"Unsupported API response format: {type(data)}")
+
             logger.info(f"Loaded {len(df)} rows from API")
             return df
         except Exception as e:
@@ -223,10 +242,17 @@ class DataIngestion:
                              "invalid_values": {},
                              "is_valid": True}
             # Check for missing values
-            missing = df.isnull().sum()
-            results["missing_values"] = missing[missing > 0].to_dict()
-            duplicates = df.duplicated().sum()
-            results["duplicates"] = duplicates
+            results["missing_values"] = df.isnull().sum()[lambda x:x > 0].to_dict()
+            results["duplicates"] = df.duplicated().sum()
+            for column in df.select_dtypes(include=[np.number]).columns:
+                q1 = df[column].quantile(0.25)
+                q3 = df[column].quantile(0.75)
+                iqr = q3 - q1
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+                outliers = df[(df[column] < lower_bound) | (df[column] > upper_bound)]
+                if not outliers.empty:
+                    results['outliers'][column] = len(outliers)
             # Apply custom validation rules
             if rules:
                 for column, rule_dict in rules.items():
@@ -265,20 +291,26 @@ class DataIngestion:
                                               "duplicates":"drop",              # Options: drop, keep
                                               "outliers":"none"}                  # Options: none , clip, drop
            strategies = strategies or {}
+           strategies = {**default_strategies, **strategies}
+
            for key, value in default_strategies.items():
                strategies[key] = strategies.get(key, value)
            # Handle duplicates
            if strategies["duplicates"] == "drop":
                initial_count = len(df_clean)
                df_clean = df_clean.drop_duplicates()
-               dropped_count = initial_count - len(df_clean)
-               logger.info(f"Dropped {dropped_count} duplicate rows")
+               logger.info(f"Dropped {initial_count - len(df_clean)} duplicate rows")
            # Handle missing values globally
-           if strategies["missing_values"] == "drop":
+           if strategies["missing_values"] == "impute":
+               for column in df_clean.columns:
+                   if pd.api.types.is_numeric_dtype(df_clean[column]):
+                       df_clean[column].fillna(df_clean[column].mean(), inplace = True)
+                   else:
+                       df_clean[column].fillna(df_clean[column].mode()[0], inplace = True)
+           elif strategies["missing_values"] == "drop":
                initial_count = len(df_clean)
                df_clean = df_clean.dropna()
-               dropped_count = initial_count - len(df_clean)
-               logger.info(f"Dropped {dropped_count} rows with missing values")
+               logger.info(f"Dropped {initial_count - len(df_clean)} rows with missing values")
            # Handle column-specific strategies
            for column, strategy in strategies.get("columns", {}).items():
                if column not in df_clean.columns:
@@ -351,18 +383,22 @@ class DataIngestion:
            :return:                            None
            """
            logger.info(f"Saving processed data to {output_path} in {format} format")
-           # Create directory if has not exist
-           os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok = True)
+
+           os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
            try:
-               if format.lower() == "cpu":
-                   df.to_csv(output_path, index = False, **kwargs)
-               elif format.lower() == "parquet":
-                   df.to_parquet(output_path, index = False, **kwargs)
-               elif format.lower() == "excel":
-                   df.to_excel(output_path, index = False, **kwargs)
+               if format.lower() == 'csv' and len(df) > 1_000_000:
+                   df.to_csv(output_path, index=False, chunksize=100_000, **kwargs)
+               elif format.lower() == 'csv':
+                   df.to_csv(output_path, index=False, **kwargs)
+               elif format.lower() == 'parquet':
+                   df.to_parquet(output_path, index=False, **kwargs)
+               elif format.lower() == 'excel':
+                   df.to_excel(output_path, index=False, **kwargs)
                else:
                    raise ValueError(f"Unsupported format: {format}")
-               logger.info(f"Data succesfully saved to {output_path}")
+
+               logger.info(f"Data successfully saved to {output_path}")
            except Exception as e:
                logger.error(f"Failed to save data: {e}")
                raise
@@ -381,7 +417,7 @@ class DataIngestion:
               'dtypes': df.dtypes.astype(str).to_dict(),
               'missing_values': df.isnull().sum().to_dict(),
               'missing_percentage': (df.isnull().mean() * 100).round(2).to_dict(),
-              'summary': {}}
+              'summary': df.describe().to_dict()}
           # Generate summary statistics
           for column in df.columns:
               if pd.api.types.is_numeric_dtype(df[column]):
@@ -406,3 +442,89 @@ class DataIngestion:
               except ImportError:
                   logger.warning("pandas-profiling not installed. HTML report not generated")
           return profile
+
+    def merge_dataset(self, dfs:List[pd.DataFrame], on:Union[str, List[str]], how:str = "inner") -> pd.DataFrame :
+        """
+        Merge multiple dataset into a DataFrame
+
+        :param dfs:     List of DataFrame to merge
+        :param on:      Column(s) to join
+        :param how:   Type of merge to perform
+        :return:            Merged DataFrame
+        """
+        if not dfs:
+            raise ValueError("No DataFrame provided for merging")
+        logger.info(f"Merging {len(dfs)} datasets using '{how}' join{' on ' + str(on) if on else ''}")
+        result = dfs[0]
+        if how == "concat" or on is None:
+            result = pd.concat(dfs, ignore_index = True)
+        else:
+            result = dfs[0]
+            for i, df in enumerate(dfs[1:], 1):
+                logger.debug(f"Merging dataset {i}")
+                result = result.merge(df, on = on, how = how, suffixes = (None, f"_{i}"))
+        logger.info(f"Merged dataset has {len(result)} rows and {len(result.columns)} columns")
+        return result
+
+def detect_file_encoding(file_path:str) -> str:
+    """
+    Detect encoding of a file
+
+    :param file_path:  Path to a file
+    :return:                  Detected encoding
+    """
+    try:
+        import chardet
+        with open(file_path, "rb") as f:
+            result = chardet.detect(f.read(10000))
+        return result['encoding']
+    except ImportError:
+        logger.warning("chardet not installed. Defaulting to utf-8 encoding")
+        return 'utf-8'
+    except Exception as e:
+        logger.error(f"Error detecting encoding : {e}")
+        return "utf-8"
+
+def get_optimal_dtypes(df: pd.DataFrame) -> Dict:
+    """
+    Determine optimal dtypes for DataFrame columns for minimizing memory usage
+    :param df:   Input DataFrame
+    :return:       Dictionary mapping columns to optimal dtypes
+    """
+    dtypes = {}
+    for col in df.columns:
+        if pd.api.types.is_object_dtype(df[col]) and df[col].nunique() < len(df) * 0.5:
+            dtypes[col] = 'category'
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            if (df[col].notna().all() and (df[col] == df[col].astype(int)).all()):
+                col_min, col_max = df[col].min(), df[col].max()
+                if col_min >= 0:
+                    if col_max < 2 ** 8:
+                        dtypes[col] = np.uint8
+                    elif col_max < 2 ** 16:
+                        dtypes[col] = np.uint16
+                    elif col_max < 2 ** 32:
+                        dtypes[col] = np.uint32
+                    else:
+                        dtypes[col] = np.uint64
+                else:
+                    if col_min >= -2 ** 7 and col_max < 2 ** 7:
+                        dtypes[col] = np.int8
+                    elif col_min >= -2 ** 15 and col_max < 2 ** 15:
+                        dtypes[col] = np.int16
+                    elif col_min >= -2 ** 31 and col_max < 2 ** 31:
+                        dtypes[col] = np.int32
+                    else:
+                        dtypes[col] = np.int64
+            else:
+                dtypes[col] = np.float32
+    return dtypes
+
+def apply_optimal_dtypes(df:pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply optimal dtypes to DataFrame to reduce memory usage
+    :param df:       Input DataFrame
+    :return:            DataFrame with optimized dtypes
+    """
+    optimal_dtypes = get_optimal_dtypes(df)
+    return df.astype(optimal_dtypes)
