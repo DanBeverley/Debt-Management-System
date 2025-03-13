@@ -11,16 +11,13 @@ import json
 import logging
 import numpy as np
 import pandas as pd
-from typing import Dict, Union, Optional, List, Tuple, Literal
-import warnings
-from pathlib import Path
+from typing import Dict, Union, Optional, List
 import dask.dataframe as dd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime
 from sqlalchemy import create_engine
 import requests
-from tqdm import tqdm
 
 logging.basicConfig(level = logging.INFO, format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                                     handlers = [logging.FileHandler('data_ingestion.log'),
@@ -121,13 +118,15 @@ class DataIngestion:
             logger.error(f"Error loading data: {e}")
             raise
 
-    def _cache_and_return(self, df:pd.DataFrame, cache_file:str, use_cache:bool) -> pd.DataFrame:
+    @staticmethod
+    def _cache_and_return(df:pd.DataFrame, cache_file:str, use_cache:bool) -> pd.DataFrame:
         if use_cache:
             logger.info(f"Caching data to {cache_file}")
             df.to_parquet(cache_file, index = False)
         return df
 
-    def load_user_data(self, user_input: Union[Dict, str]) -> dict[str, pd.DataFrame]:
+    @staticmethod
+    def load_user_data(user_input: Union[Dict, str]) -> dict[str, pd.DataFrame]:
         """
         Parse and load financial data provided by the user
 
@@ -195,7 +194,8 @@ class DataIngestion:
             logger.error(f"Database loading error: {e}")
             raise
 
-    def load_from_api(self, api_url:str, params:Dict = None, headers:Dict = None) -> pd.DataFrame:
+    @staticmethod
+    def load_from_api(api_url:str, params:Dict = None, headers:Dict = None) -> pd.DataFrame:
         """
         Load data from API endpoint
 
@@ -227,12 +227,13 @@ class DataIngestion:
             logger.error(f"API loading error: {e}")
             raise
 
-    def validate_dataset(self, df:pd.DataFrame, rules:Dict = None) -> Dict:
+    @staticmethod
+    def validate_dataset(df:pd.DataFrame, rules:Dict = None) -> Dict:
             """
             Validate the dataset against a set of rule and return validation results
 
             :param df:         DataFrame to validate
-            :param rule:      Validation rules
+            :param rules:      Validation rules
             :return:              Validation results containing issues found
             """
             logger.info("Validating dataset")
@@ -277,7 +278,8 @@ class DataIngestion:
             logger.info(f"Validation complete: {'valid' if results['is_valid'] else 'invalid'} dataset")
             return results
 
-    def clean_dataset(self, df:pd.DataFrame, strategies:Dict = None) -> pd.DataFrame:
+    @staticmethod
+    def clean_dataset(df:pd.DataFrame, strategies:Dict = None) -> pd.DataFrame:
            """
            Clean the dataset based on specified strategies
 
@@ -371,8 +373,8 @@ class DataIngestion:
                return df.sample(n = min(n, len(df)), random_state = 42)
            else:
                return df.sample(frac = frac, random_state = 42)
-
-    def save_processed_data(self, df:pd.DataFrame, output_path:str, format:str = "parquet", **kwargs) -> None:
+    @staticmethod
+    def save_processed_data(df:pd.DataFrame, output_path:str, format:str = "parquet", **kwargs) -> None:
            """
            Save processed data to disk
 
@@ -403,7 +405,8 @@ class DataIngestion:
                logger.error(f"Failed to save data: {e}")
                raise
 
-    def generate_data_profile(self, df: pd.DataFrame, output_path:Optional[str] = None) -> Dict:
+    @staticmethod
+    def generate_data_profile(df: pd.DataFrame, output_path:Optional[str] = None) -> Dict:
           """
           Generate a profile report of the dataset
           :param df:                     DataFrame to profile
@@ -443,7 +446,8 @@ class DataIngestion:
                   logger.warning("pandas-profiling not installed. HTML report not generated")
           return profile
 
-    def merge_dataset(self, dfs:List[pd.DataFrame], on:Union[str, List[str]], how:str = "inner") -> pd.DataFrame :
+    @staticmethod
+    def merge_dataset(dfs:List[pd.DataFrame], on:Union[str, List[str]], how:str = "inner") -> pd.DataFrame :
         """
         Merge multiple dataset into a DataFrame
 
@@ -496,7 +500,7 @@ def get_optimal_dtypes(df: pd.DataFrame) -> Dict:
         if pd.api.types.is_object_dtype(df[col]) and df[col].nunique() < len(df) * 0.5:
             dtypes[col] = 'category'
         elif pd.api.types.is_numeric_dtype(df[col]):
-            if (df[col].notna().all() and (df[col] == df[col].astype(int)).all()):
+            if df[col].notna().all() and (df[col] == df[col].astype(int)).all():
                 col_min, col_max = df[col].min(), df[col].max()
                 if col_min >= 0:
                     if col_max < 2 ** 8:
