@@ -8,19 +8,11 @@ normalizing numerical features, and feature engineering specific to lending and 
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List, Union, Tuple, Optional, Any
-import matplotlib.pyplot as plt
-import seaborn as sns
+from typing import Dict, List, Optional
 from sklearn.preprocessing import (
 StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder, LabelEncoder,
-OrdinalEncoder, PowerTransformer, QuantileTransformer)
-from sklearn.impute import SimpleImputer, KNNImputer
-from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_classif, mutual_info_classif
-from sklearn.decomposition import PCA
-from sklearn.pipeline import Pipeline
+OrdinalEncoder)
 import category_encoders as ce
-from datetime import datetime
-import joblib
 import os
 from scipy import stats
 
@@ -243,6 +235,75 @@ class DataPreprocessor:
 
              logger.info("Categorical encoding completed")
              return df
+
+         def normalize_data(self, data:pd.DataFrame, columns: Optional[List[str]] = None,
+                                          training:bool = True) -> pd.DataFrame:
+              """
+              Scale numerical features to a standard range
+
+              :param data:             Data with numerical columns
+              :param columns:      Specific columns to scale (if None, auto-detect)
+              :param training:       Training or prediction data
+              :return:                      DataFrame with scaled numerical columns
+              """
+              logger.info("Starting data normalization")
+              df = data.copy()
+
+              if columns is None:
+                  numerical_cols = list(df.select_dtypes(include = ["number"]).columns)
+              else:
+                  numerical_cols = [col for col in columns if col in df.columns]
+              if not numerical_cols:
+                  logger.info("No numerical columns for normalization")
+                  return df
+              logger.info(f"Normalizing {len(numerical_cols)} numerical columns: {numerical_cols}")
+              for col in numerical_cols:
+                  if training:
+                      if self.scaling_method == "standard":
+                          scaler = StandardScaler()
+                      elif self.scaling_method == "minmax":
+                          scaler = MinMaxScaler()
+                      elif self.scaling_method == "robust":
+                          scaler = RobustScaler()
+                      else:
+                          scaler = StandardScaler()
+                      df[col] = scaler.fit_transform(df[[col]])
+                      self.scalers[col] = scaler
+                  else:
+                      if col in self.scalers:
+                          scaler = self.scalers[col]
+                          df[col] = scaler.transforms(df[[col]])
+                      else:
+                          logger.warning(f"No scaler found for column '{col}' during prediction")
+              logger.info("Data normalization completed")
+              return df
+
+         @staticmethod
+         def feature_engineering(data:pd.DataFrame) -> pd.DataFrame:
+             """
+             Create new features from existing data
+
+             :param data:  Input data
+             :return:           DataFrame with new features
+             """
+             logger.info("Starting feature engineering")
+             df = data.copy()
+             # Debt-to-income ratio
+             if 'total_debt' in df.columns and 'income' in df.columns:
+                 df['debt_to_income'] = df['total_debt'] / df['income'].replace(0, np.nan)
+                 logger.info("Added debt-to-income ratio feature")
+            # Credit utilization
+             if 'credit_limit' in df.columns and 'credit_used' in df.columns:
+                 df['credit_utilization'] = df['credit_used'] / df['credit_limit'].replace(0, np.nan)
+                 logger.info("Added credit utilization feature")
+            # Age from birthdate
+             if "birth_date" in df.columns:
+                 df["age"] = (pd.to_datetime("today") - pd.to_datetime(df["birth_date"], errors = "coerce")).dt.days / 365.25
+                 logger.info("Added age feature from birth_date")
+             logger.info("Feature engineering completed")
+             return df
+
+
 
 
 
