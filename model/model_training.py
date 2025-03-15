@@ -4,15 +4,21 @@ Model Training Module for AI Debt Management System
 Handles the training, evaluation, and persistence of machine learning models for debt management prediction tasks.
 """
 import os
-import sys
 import time
-import json
 import logging
-from typing import Optional, Dict, Tuple, Union, Optional, Any, Callable
-from datetime import datetime
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import Dict, Tuple, Union, Optional, Any
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
+    confusion_matrix, classification_report, mean_squared_error, mean_absolute_error,
+    r2_score, explained_variance_score, log_loss
+)
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
+from sklearn.linear_model import LogisticRegression
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
@@ -20,29 +26,30 @@ import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 
-from sklearn.model_selection import train_test_split, cross_val_score, KFold, StratifiedKFold
-from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
-                                                    StackingClassifier, RandomForestRegressor, StackingRegressor)
-from sklearn.linear_model import  LogisticRegression, LinearRegression
 try:
     import tensorflow as tf
     from tensorflow.keras.models import Sequential, Model
     from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, Input
     from tensorflow.keras.optimizers import Adam
+    from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
     from tensorflow.keras.utils import plot_model
     from tensorflow.keras.wrappers.scikit_learn import KerasClassifier, KerasRegressor
+
     HAS_TENSORFLOW = True
 except ImportError:
     HAS_TENSORFLOW = False
 
+# For model interpretability
 try:
     import shap
+
     HAS_SHAP = True
 except ImportError:
-    HAS_SHAPE = False
+    HAS_SHAP = False
 
-import joblib
-import pickle
+
+
+# For model persistence
 import mlflow
 import mlflow.sklearn
 import mlflow.tensorflow
@@ -253,3 +260,300 @@ class ModelTrainer:
 
               else:
                   raise ValueError(f"Unsupported task_type: {task_type}. Use 'classifier' or 'regressor'.")
+
+       def train_model(self, X_train:Optional[pd.DataFrame] = None, y_train:Optional[pd.Series] = None,
+                                   X_val:Optional[pd.DataFrame] = None, y_val:Optional[pd.DataFrame] = None,
+                                   model_params:Optional[Dict] = None) -> Any:
+           """
+           Train a machine learning model using preprocessed training data
+
+           :param X_train:                Features for training
+           :param y_train:                 Target for training
+           :param X_val:                    Features for validation
+           :param y_val:                    Target for validation
+           :param model_params:    model hyperparameters
+           :return:                               Trained model object
+           """
+           X_train = X_train if X_train is not None else self.X_train
+           Y_train = y_train if y_train is not None else self.y_train
+           X_val = X_val if X_val is not None else self.X_val
+           y_val = y_val if y_val is not None else self.y_val
+
+           if X_train is None and y_train is None:
+               raise ValueError("Training data not provided. Call split_data() first or provide X_train and y_train")
+           logger.info(f"Starting model training with {self.model_algorithm} algorithm")
+           start_time = time.time()
+
+           if self.use_ensemble:
+               logger.info("Using stacked ensemble model for improved performance")
+               model = self._create_stacked_ensemble(self.model_type)
+           else:
+               if self.model_algorithm == "xgboost":
+                   if self.model_type == "classifier":
+                       model = xgb.XGBClassifier(n_estimators = 300, max_depth = 5, learning_rate = 3e-4,
+                                                                     subsample = 0.8, colsample_bytree = 0.8, random_state = self.random_state,
+                                                                     n_jobs = self.n_jobs)
+                   else:
+                       model = xgb.XGBRegressor(
+                           n_estimators=300, max_depth=5, learning_rate=0.1,
+                           subsample=0.8, colsample_bytree=0.8,
+                           random_state=self.random_state, n_jobs=self.n_jobs
+                       )
+               elif self.model_algorithm == 'lightgbm':
+                       if self.model_type == 'classifier':
+                           model = lgb.LGBMClassifier(
+                               n_estimators=300, max_depth=5, learning_rate=0.1,
+                               subsample=0.8, colsample_bytree=0.8,
+                               random_state=self.random_state, n_jobs=self.n_jobs
+                           )
+                       else:
+                           model = lgb.LGBMRegressor(
+                               n_estimators=300, max_depth=5, learning_rate=0.1,
+                               subsample=0.8, colsample_bytree=0.8,
+                               random_state=self.random_state, n_jobs=self.n_jobs
+                           )
+               else:
+                       # Default to RandomForest
+                       if self.model_type == 'classifier':
+                           model = RandomForestClassifier(
+                               n_estimators=300, max_depth=10,
+                               random_state=self.random_state, n_jobs=self.n_jobs
+                           )
+                       else:
+                           model = RandomForestRegressor(
+                               n_estimators=300, max_depth=10,
+                               random_state=self.random_state, n_jobs=self.n_jobs
+                           )
+           if model_params:
+              model.set_params(**model_params)
+           if self.tune_hyperparameters and not isinstance(model, StackingClassifier):
+               logger.info("Tuning hyperparameters")
+               model = self._tune_hyperparameters(model, X_train, y_train, X_val, y_val)
+           if HAS_TENSORFLOW and isinstance(model, (KerasClassifier, KerasRegressor)):
+               callbacks = [
+                   EarlyStopping(monitor = "val_loss", patience = 10, restore_best_weights = True),
+                   ReduceLROnPlateau(monitor = "val_loss", factor = 0.2, patience = 5, min_lr = 1e-6)
+               ]
+               if X_val is not None and y_val is not None:
+                   model.fit(X_train, y_train, validation_data = (X_val, y_val),
+                                    callbacks = callbacks)
+               else:
+                   model.fit(X_train, y_train, validation_split = 0.2, callbacks = callbacks)
+           else:
+               # For sklearn compatible models
+               model.fit(X_train, y_train)
+
+           self.training_time = time.time() - start_time
+           logger.info(f"Model training completed in {self.training_time:.2f} seconds")
+           self._extract_feature_importance(model, X_train)
+           self.model = model
+           self.trained = True
+           return model
+
+       def _tune_hyperparameters(self, model, X_train, y_train, X_val, y_val, n_trials:int = 50) -> Any:
+             """
+             Tunes hyperparameters using Optuna
+
+             :param model:    model for tuning
+             :param X_train:    training features
+             :param y_train:     training target
+             :param X_val:        validation features
+             :param y_val:         validation targets
+             :param n_trials:     number of tuning rials
+             :return:                   model with optimized parameters
+             """
+             def objective(trial):
+                 """Objective function for hyperparameter optimization"""
+                 if isinstance(model, (xgb.XGBClassifier, xgb.XGBRegressor)):
+                     params = {
+                         'n_estimators': trial.suggest_int('n_estimators', 100, 1000, step=100),
+                         'max_depth': trial.suggest_int('max_depth', 3, 10),
+                         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                         'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                         'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+                     }
+                 elif isinstance(model, (lgb.LGBMClassifier, lgb.LGBMRegressor)):
+                     params = {
+                         'n_estimators': trial.suggest_int('n_estimators', 100, 1000, step=100),
+                         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                         'num_leaves': trial.suggest_int('num_leaves', 20, 200),
+                         'max_depth': trial.suggest_int('max_depth', 3, 10),
+                         'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+                         'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                     }
+                 elif isinstance(model, (RandomForestClassifier, RandomForestRegressor)):
+                     params = {
+                         'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                         'max_depth': trial.suggest_int('max_depth', 3, 15),
+                         'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+                         'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
+                     }
+                 else:
+                     # Generic model - skip tuning
+                     return 0.0
+                 # Create temporary model with new parameters
+                 temp_model = clone_model(model)
+                 temp_model.set_params(**params)
+                 # Cross validation for evaluation
+                 if self.model_type == "classifier":
+                     score = cross_val_score(temp_model, X_train, y_train, cv=3, scoring = "roc_auc", n_jobs = self.n_jobs)
+                 else:
+                     score = -1 * cross_val_score(temp_model, X_train, y_train, cv = 3, scoring = "neg_mean_squared_error",
+                                                                    n_jobs = self.n_jobs).mean()
+                 return score
+
+             from sklearn.base import clone as clone_model
+             # Set up Optuna
+             study_name = f"{model.__class__.__name__}_optimization"
+             sampler = TPESampler(seed = self.random_state)
+             pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=5)
+             try:
+                 study = optuna.create_study(study_name = study_name,
+                                                                   direction="maximize" if self.model_type == "classifier" else "minimize",
+                                                                   sampler = sampler, pruner = pruner)
+                 study.optimize(objective, n_trials = n_trials)
+                 best_params = study.best_params
+                 logger.info(f"Best hyperparameters: {best_params}")
+
+                 optimized_model = clone_model(model)
+                 optimized_model.set_params(**best_params)
+
+                 return optimized_model
+             except Exception as e:
+                 logger.warning(f"Hyperparameter tuning failed {e}. Using original model")
+                 return model
+
+       def _extract_feature_importance(self, model, X:pd.DataFrame) -> None:
+           """
+           Extract feature importance from the model if available
+
+           :param model:    Trained model
+           :param X:             Feature DataFrame to get column names
+           """
+           try:
+               if hasattr(model, "feature_importances_"):
+                   # For tree-based model (RandomForest, XGBoost, etc)
+                   importance = model.feature_importances_
+               elif hasattr(model, "coef_"):
+                   # Linear models
+                   importance = np.abs(model.coef_).flatten()
+               elif hasattr(model, "feature_importances_"):
+                   # LightBGM models
+                   importance = model.feature_importances_()
+               elif isinstance(model, StackingClassifier) or isinstance(model, StackingRegressor):
+                   # For ensemble models, get importance from the final estimator
+                   if hasattr(model.final_estimator_, "coef_"):
+                       importance = np.abs(model.final_estimator_.coef_).flatten()
+                       feature_names = [f"feature_{i}" for i in range(len(importance))]
+                       self.feature_importance = dict(zip(feature_names, importance))
+                       return
+                   else:
+                       # Can't extract from this ensemble
+                       return
+               else:
+                       # Model doesn't support built-in feature importance
+                       return
+               # Map importance to feature names
+               feature_names = X.columns
+               self.feature_importance = dict(zip(feature_names, importance))
+               # Create log for most important features
+               top_features = sorted(self.feature_importance.items(), key = lambda x:x[1], reverse = True)[:10]
+               logger.info("Top 10 features by importance: ")
+               for feature, importance_val in top_features:
+                   logger.info(f"   {feature}   :   {importance_val:.4f}")
+           except Exception as e:
+               logger.warning(f"Could not extract feature importance: {e}")
+
+       def evaluate_model(self, model:Optional[Any] = None, X_test: Optional[pd.DataFrame] = None,
+                                          y_test: Optional[pd.Series] = None) -> Dict[str, float]:
+           """
+           Evaluates the model's performance using appropriate metrics
+           :param model:     Trained model to evaluate
+           :param X_test:      Test features
+           :param y_test:      Test targets
+           :return:                 Dictionary of evaluation metrics
+           """
+           # Use stored model and data if not provided
+           model = model if model is not None else self.model
+           X_test = X_test if X_test is not None else self.X_test
+           y_test = y_test if y_test is not None else self.y_test
+
+           if model is None:
+               raise ValueError("No trained model available . Call train_model() first or provide a model")
+           if X_test is None or y_test is None:
+               raise ValueError("Test data is not provided. Call split_data() first or provide X_test and y_test")
+           logger.info("Evaluating model performance")
+
+           if self.model_type == "classifier":
+               # For classifiers , get both class predictions and probabilities if available
+               y_pred = model.predict(X_test)
+               try:
+                   # Get probability predictions for the positive class
+                   y_pred_prob = model.predict_prob(X_test)[:,1]
+                   has_prob = True
+               except (AttributeError, IndexError):
+                   # Model doesn't support
+                   y_pred_prob = None
+                   has_prob = False
+               # Calculate classification metrics
+               metrics = {"accuracy":accuracy_score(y_test, y_pred),
+                                "precision":precision_score(y_test, y_pred, average = "weighted"),
+                                "recall": recall_score(y_test, y_pred, average = 'weighted'),
+                                "f1_score": f1_score(y_test, y_pred, average = "weighted")}
+               if has_prob:
+                   try:
+                       metrics["roc_auc"] = roc_auc_score(y_test, y_pred_prob)
+                       metrics["log_loss"] = log_loss(y_test, y_pred_prob)
+                   except:
+                       pass
+
+                       # Create confusion matrix
+                       cm = confusion_matrix(y_test, y_pred)
+
+                       # Log detailed classification report
+                       logger.info("\nClassification Report:")
+                       logger.info(classification_report(y_test, y_pred))
+
+                       # Plot confusion matrix if in an interactive environment
+                       try:
+                           plt.figure(figsize=(10, 8))
+                           sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+                           plt.xlabel('Predicted labels')
+                           plt.ylabel('True labels')
+                           plt.title('Confusion Matrix')
+                           plt.savefig(os.path.join(self.models_dir, 'confusion_matrix.png'))
+                           plt.close()
+                       except Exception as e:
+                           logger.warning(f"Could not plot confusion matrix: {e}")
+
+                   else:
+                       # Regression metrics
+                       y_pred = model.predict(X_test)
+
+                       metrics = {
+                           'mean_squared_error': mean_squared_error(y_test, y_pred),
+                           'root_mean_squared_error': np.sqrt(mean_squared_error(y_test, y_pred)),
+                           'mean_absolute_error': mean_absolute_error(y_test, y_pred),
+                           'r2_score': r2_score(y_test, y_pred),
+                           'explained_variance': explained_variance_score(y_test, y_pred)
+                       }
+
+                       # Plot actual vs predicted values
+                       try:
+                           plt.figure(figsize=(10, 6))
+                           plt.scatter(y_test, y_pred, alpha=0.5)
+                           plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
+                           plt.xlabel('Actual values')
+                           plt.ylabel('Predicted values')
+                           plt.title('Actual vs Predicted Values')
+                           plt.savefig(os.path.join(self.models_dir, 'actual_vs_predicted.png'))
+                           plt.close()
+                       except Exception as e:
+                           logger.warning(f"Could not plot actual vs predicted values: {e}")
+
+                       # Log evaluation metrics
+                   logger.info("Evaluation metrics:")
+                   for metric_name, metric_value
+
