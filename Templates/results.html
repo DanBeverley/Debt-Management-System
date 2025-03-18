@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debt Management Recommendations</title>
+</head>
+<body>
+    <h1>Your Debt Management Recommendations</h1>
+    
+    <h2>Recommended Strategy: {{ recommendations.strategy }}</h2>
+    
+    <p>{{ recommendations.details }}</p>
+    
+    <a href="/">Back to Input Form</a>
+</body>
+</html>
+    'income': float(request.form['income']),
+    'expenses': float(request.form['expenses']),
+    'credit_score': int(request.form['credit_score']),
+    'debts': [
+        {
+            'amount': float(request.form['debt1_amount']),
+            'interest_rate': float(request.form['debt1_interest_rate']),
+            'minimum_payment': float(request.form['debt1_minimum_payment'])
+        },
+        {
+            'amount': float(request.form['debt2_amount']),
+            'interest_rate': float(request.form['debt2_interest_rate']),
+            'minimum_payment': float(request.form['debt2_minimum_payment'])
+        }
+        # Add more debts as needed
+    ]
+}

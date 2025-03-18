@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debt Management System</title>
+</head>
+<body>
+    <h1>AI Debt Management System</h1>
+    <form action="/predict" method="post">
+        <h2>Personal Information</h2>
+        <label>Income: <input type="number" name="income" required></label><br>
+        <label>Expenses: <input type="number" name="expenses" required></label><br>
+        <label>Credit Score: <input type="number" name="credit_score" required></label><br>
+        
+        <h2>Debt 1</h2>
+        <label>Amount: <input type="number" name="debt1_amount" required></label><br>
+        <label>Interest Rate: <input type="number" step="0.01" name="debt1_interest_rate" required></label><br>
+        <label>Minimum Payment: <input type="number" name="debt1_minimum_payment" required></label><br>
+        
+        <h2>Debt 2</h2>
+        <label>Amount: <input type="number" name="debt2_amount" required></label><br>
+        <label>Interest Rate: <input type="number" step="0.01" name="debt2_interest_rate" required></label><br>
+        <label>Minimum Payment: <input type="number" name="debt2_minimum_payment" required></label><br>
+        
+        <button type="submit">Get Recommendations</button>
+    </form>
+</body>
+</html>
