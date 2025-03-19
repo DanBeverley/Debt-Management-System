@@ -26,15 +26,16 @@ import catboost as cb
 import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
-
+from data.data_processing import DataPreprocessor
 try:
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
     import tensorflow as tf
-    from tensorflow.keras.models import Sequential, Model
-    from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, Input
-    from tensorflow.keras.optimizers import Adam
-    from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
-    from tensorflow.keras.utils import plot_model
-    from tensorflow.keras.wrappers.scikit_learn import KerasClassifier, KerasRegressor
+    from tensorflow.keras.models import Sequential, Model                                         # type: ignore
+    from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, Input                 # type: ignore
+    from tensorflow.keras.optimizers import Adam                                                  # type: ignore
+    from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau      # type: ignore
+    from tensorflow.keras.utils import plot_model                                                 # type: ignore
+    from scikeras.wrappers import KerasClassifier, KerasRegressor                                 # type: ignore
 
     HAS_TENSORFLOW = True
 except ImportError:
@@ -535,21 +536,38 @@ class ModelTrainer:
 
          if self.model_type == 'classifier':
              y_pred = model.predict(X_test)
-             y_pred_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, 'predict_proba') else None
+             
+             # Safely handle predict_proba
+             y_pred_proba = None
+             if hasattr(model, 'predict_proba'):
+                 probas = model.predict_proba(X_test)
+                 # Check if we have multiple classes (more than one column in probabilities)
+                 if probas.shape[1] > 1:
+                     y_pred_proba = probas[:, 1]  # For binary classification, get probability of class 1
+                 else:
+                     logger.warning("Only one class in predictions. Using probability of the single class.")
+                     y_pred_proba = probas[:, 0]  # Use the only available class
 
              metrics = {
                  'accuracy': accuracy_score(y_test, y_pred),
-                 'precision': precision_score(y_test, y_pred, average='weighted'),
-                 'recall': recall_score(y_test, y_pred, average='weighted'),
-                 'f1_score': f1_score(y_test, y_pred, average='weighted'),
+                 'precision': precision_score(y_test, y_pred, average='weighted', zero_division=0),
+                 'recall': recall_score(y_test, y_pred, average='weighted', zero_division=0),
+                 'f1_score': f1_score(y_test, y_pred, average='weighted', zero_division=0),
              }
 
              if y_pred_proba is not None:
-                 metrics['roc_auc'] = roc_auc_score(y_test, y_pred_proba)
-                 metrics['log_loss'] = log_loss(y_test, y_pred_proba)
+                 try:
+                     # Only calculate roc_auc if we have both classes
+                     if len(np.unique(y_test)) > 1:
+                         metrics['roc_auc'] = roc_auc_score(y_test, y_pred_proba)
+                         metrics['log_loss'] = log_loss(y_test, y_pred_proba)
+                     else:
+                         logger.warning("Only one class in test set. ROC AUC and log loss not calculated.")
+                 except Exception as e:
+                     logger.warning(f"Could not calculate ROC AUC or log loss: {e}")
 
              logger.info("\nClassification Report:")
-             logger.info(classification_report(y_test, y_pred))
+             logger.info(classification_report(y_test, y_pred, zero_division=0))
 
              try:
                  cm = confusion_matrix(y_test, y_pred)

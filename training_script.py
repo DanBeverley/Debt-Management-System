@@ -122,6 +122,53 @@ if preprocessed_data.isna().any().any():
     print("Filling missing values...")
     preprocessed_data = preprocessed_data.fillna(preprocessed_data.mean())
 
+# Check target variable distribution
+target_counts = preprocessed_data['target_column'].value_counts()
+print(f"Target distribution: {target_counts}")
+
+# If we have a severe class imbalance or only one class, create synthetic data
+unique_classes = preprocessed_data['target_column'].nunique()
+if unique_classes == 1:
+    print("WARNING: Only one class found in target variable. Creating synthetic data for second class...")
+    # Get the existing class
+    existing_class = preprocessed_data['target_column'].iloc[0]
+    # Create the opposite class (0 if existing is 1, 1 if existing is 0)
+    opposite_class = 1.0 if existing_class == 0.0 else 0.0
+    
+    # Create a few synthetic rows with the opposite class
+    # We'll use some of the existing rows but change the target value
+    synthetic_rows = preprocessed_data.iloc[:10].copy()
+    synthetic_rows['target_column'] = opposite_class
+    
+    # Add some random noise to the synthetic data to make it different
+    for col in synthetic_rows.columns:
+        if col != 'target_column' and synthetic_rows[col].dtype in [np.float64, np.float32, float]:
+            # Add random noise to numeric columns
+            synthetic_rows[col] = synthetic_rows[col] * (1 + np.random.uniform(-0.1, 0.1, size=len(synthetic_rows)))
+    
+    # Append the synthetic rows to the dataset
+    preprocessed_data = pd.concat([preprocessed_data, synthetic_rows], ignore_index=True)
+    print(f"Added {len(synthetic_rows)} synthetic rows with class {opposite_class}")
+    print(f"New target distribution: {preprocessed_data['target_column'].value_counts()}")
+elif target_counts.min() < 10:  # If the minority class has fewer than 10 samples
+    print(f"WARNING: Severe class imbalance detected: {target_counts}")
+    # We'll oversample the minority class a bit to help the model
+    minority_class = target_counts.idxmin()
+    minority_rows = preprocessed_data[preprocessed_data['target_column'] == minority_class]
+    
+    # Duplicate some minority class rows
+    duplicates_needed = max(10, int(len(preprocessed_data) * 0.1)) - len(minority_rows)
+    if duplicates_needed > 0:
+        oversample_rows = minority_rows.sample(duplicates_needed, replace=True)
+        # Add some noise to avoid exact duplicates
+        for col in oversample_rows.columns:
+            if col != 'target_column' and oversample_rows[col].dtype in [np.float64, np.float32, float]:
+                oversample_rows[col] = oversample_rows[col] * (1 + np.random.uniform(-0.05, 0.05, size=len(oversample_rows)))
+        
+        preprocessed_data = pd.concat([preprocessed_data, oversample_rows], ignore_index=True)
+        print(f"Added {len(oversample_rows)} rows to balance the minority class")
+        print(f"New target distribution: {preprocessed_data['target_column'].value_counts()}")
+
 print(f"Final preprocessed data shape: {preprocessed_data.shape}")
 
 print("Separating features and target...")
