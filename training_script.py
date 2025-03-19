@@ -4,6 +4,8 @@ from model.model_training import ModelTrainer
 import argparse
 import joblib
 import os
+import pandas as pd
+import numpy as np
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--sample_size", type=int, default=1000, help="Number of rows to sample from the dataset")
@@ -71,6 +73,58 @@ preprocessor = DataPreprocessor()
 print("Further cleaning and preprocessing data...")
 preprocessed_data = preprocessor.clean_data(data)
 
+# Manual handling of problematic columns
+print("Handling categorical variables and feature selection...")
+# Convert term to numeric if it exists and is still a string
+if 'term' in preprocessed_data.columns and preprocessed_data['term'].dtype == 'object':
+    print("Converting term column to numeric...")
+    preprocessed_data['term'] = preprocessed_data['term'].str.extract('(\d+)').astype(float)
+
+# Drop or convert other problematic string columns that can't be used by the model
+object_columns = preprocessed_data.select_dtypes(include=['object']).columns
+if len(object_columns) > 0:
+    print(f"Found {len(object_columns)} object columns: {list(object_columns)}")
+    
+    # For each categorical column, either encode it or drop it
+    for col in object_columns:
+        if col == 'target_column':
+            continue  # Skip target column
+            
+        # If column has few unique values, encode it
+        if preprocessed_data[col].nunique() < 20:
+            print(f"Encoding categorical column: {col} with {preprocessed_data[col].nunique()} values")
+            # One-hot encode
+            dummies = pd.get_dummies(preprocessed_data[col], prefix=col, drop_first=True)
+            preprocessed_data = pd.concat([preprocessed_data, dummies], axis=1)
+        else:
+            print(f"Dropping column with too many categories: {col}")
+        
+        # Remove original column after encoding/handling
+        preprocessed_data = preprocessed_data.drop(columns=[col])
+
+# Check for and handle any remaining non-numeric columns
+non_numeric = preprocessed_data.select_dtypes(exclude=['number']).columns
+if len(non_numeric) > 0 and 'target_column' not in non_numeric:
+    print(f"Dropping remaining non-numeric columns: {list(non_numeric)}")
+    preprocessed_data = preprocessed_data.drop(columns=non_numeric)
+elif 'target_column' in non_numeric:
+    # Handle target column if needed
+    print("Converting target column to numeric")
+    preprocessed_data['target_column'] = preprocessed_data['target_column'].astype(float)
+
+# Convert all remaining columns to float for model compatibility
+print("Converting all columns to float...")
+numeric_cols = preprocessed_data.columns.difference(['target_column'])
+preprocessed_data[numeric_cols] = preprocessed_data[numeric_cols].astype(float)
+
+# Check for NaN values and fill them
+if preprocessed_data.isna().any().any():
+    print("Filling missing values...")
+    preprocessed_data = preprocessed_data.fillna(preprocessed_data.mean())
+
+print(f"Final preprocessed data shape: {preprocessed_data.shape}")
+
+print("Separating features and target...")
 X, y = preprocessed_data.drop('target_column', axis=1), preprocessed_data['target_column']
 
 print("Initializing model trainer...")
