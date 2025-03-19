@@ -21,7 +21,7 @@ import requests
 
 logging.basicConfig(level = logging.INFO, format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                                     handlers = [logging.FileHandler('data_ingestion.log'),
-                                                        logging.StreamHandler])
+                                                        logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 class DataIngestion:
@@ -49,74 +49,202 @@ class DataIngestion:
         # Cache directory if one has not exist
         os.makedirs(self.cache_dir, exist_ok = True)
 
-    def load_lending_club_data(self,  file_path:str,
-                                                    use_cache:bool =  True,
-                                                    low_memory:bool = True,
-                                                    columns:Optional[List[str]] = None) -> pd.DataFrame:
+    def load_lending_club_data(self, file_path:str,
+                                            use_cache:bool = True,
+                                            low_memory:bool = True,
+                                            sample_size:Optional[int] = None,
+                                            columns:Optional[List[str]] = None) -> pd.DataFrame:
         """
-        Loading the Lending Club dataset from csv
-
-        :param file_path:           Path to the dataset
-        :param use_cache:         Whether to use cache if available
-        :param low_memory:    Whether to use memory-efficient loading
-        :param columns:            Specific columns to load
-        :return:                           Dataframe containing the Lending Club data
+        Loading and preprocessing the Lending Club dataset specifically for debt management predictions
+        
+        :param file_path:       Path to the Lending Club dataset
+        :param use_cache:     Whether to use cache if available
+        :param low_memory:  Whether to use memory-efficient loading
+        :param sample_size:  Number of rows to sample (None for all)
+        :param columns:        Specific columns to load (None for default essential columns)
+        :return:                   Preprocessed DataFrame ready for model training
         """
-        logger.info(f"Loading Lending Club data from {file_path}")
-        file_hash = str(hash(f"{file_path}_{str(columns)}"))
-        cache_file = os.path.join(self.cache_dir, f"lending_club_{file_hash}.parquet")
+        # Essential columns for debt management prediction
+        essential_columns = [
+            'loan_amnt', 'term', 'int_rate', 'installment', 'grade', 
+            'sub_grade', 'emp_length', 'home_ownership', 'annual_inc', 
+            'verification_status', 'loan_status', 'purpose', 'dti',
+            'delinq_2yrs', 'fico_range_low', 'fico_range_high', 'open_acc',
+            'revol_bal', 'revol_util', 'total_acc', 'total_pymnt', 
+            'total_rec_prncp', 'total_rec_int', 'last_pymnt_amnt',
+            'application_type', 'addr_state'
+        ]
+        
+        # Use provided columns or essential ones
+        columns_to_load = columns if columns is not None else essential_columns
+        
+        # Create a unique cache file name based on columns and sample size
+        cache_key = f"{file_path}_{str(columns_to_load)}_{sample_size}"
+        file_hash = str(hash(cache_key))
+        cache_file = os.path.join(self.cache_dir, f"lending_club_processed_{file_hash}.parquet")
 
+        # Return cached data if available
         if use_cache and os.path.exists(cache_file):
-            logger.info(f"Loading from cache: {cache_file}")
+            logger.info(f"Loading preprocessed data from cache: {cache_file}")
             return pd.read_parquet(cache_file)
+        
+        # Load raw data using the existing robust loading mechanism
+        logger.info(f"Loading Lending Club data from {file_path}")
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"The file {file_path} does not exist")
 
-        file_ext = os.path.splitext(file_path)[1].lower()
+        # Check if file is compressed
+        is_gzip = file_path.endswith('.gz')
+        # Get base file extension (before .gz if compressed)
+        base_path = file_path[:-3] if is_gzip else file_path
+        file_ext = os.path.splitext(base_path)[1].lower()
+        
+        # Determine compression type
+        compression = 'gzip' if is_gzip else None
+        
         supported_format = {".csv", ".parquet", ".xlsx", ".xls"}
         if file_ext not in supported_format:
             raise ValueError(f"Unsupported file format: {file_ext}. Supported formats: {supported_format}")
+        
         try:
+            # Efficient loading with Dask for large files
             if self.use_dask:
                 logger.info("Using Dask for memory-efficient loading")
                 if file_ext == ".csv":
-                    ddf = dd.read_csv(file_path, assume_missing = True,
-                                                   usecols = columns, dtype_backend = "pyarrow")
+                    ddf = dd.read_csv(file_path, assume_missing=True,
+                                               usecols=columns_to_load, 
+                                               dtype_backend="pyarrow",
+                                               compression=compression)
                 elif file_ext == ".parquet":
-                    ddf = dd.read_parquet(file_path, columns = columns)
+                    ddf = dd.read_parquet(file_path, columns=columns_to_load)
                 else:
                     logger.warning(f"Dask does not support {file_ext}. Falling back to pandas")
-                    df = pd.read_excel(file_path, usecols = columns)
-                    return self._cache_and_return(df, cache_file, use_cache)
+                    if is_gzip:
+                        logger.warning("Dask may not handle compressed Excel files well. Falling back to pandas")
+                        if file_ext in (".xlsx", ".xls"):
+                            df = pd.read_excel(file_path, usecols=columns_to_load)
+                        else:
+                            df = pd.read_csv(file_path, usecols=columns_to_load, compression=compression)
+                        # Skip to preprocessing
+                    else:
+                        df = pd.read_excel(file_path, usecols=columns_to_load)
+                        # Skip to preprocessing
+                    return self._preprocessing_steps(df, sample_size, cache_file, use_cache)
                 df = ddf.compute()
             else:
-                   # Pandas with chunking for larger CSV files
-                   if file_ext == ".csv":
-                       if os.path.getsize(file_path) > 1_000_000_000: # !GB
-                           logger.info(f"Larger file detected ({file_path}), using chunked reading")
-                           chunks = pd.read_csv(file_path, chunksize=self.chunk_size, usecols=columns,
-                                                                low_memory=low_memory, dtype_backend='pyarrow')
-                           df = pd.concat(chunks, ignore_index=True)
-                       else:
-                           df = pd.read_csv(file_path, usecols = columns, low_memory = low_memory, dtype_backend ="pyarrow")
-                   elif file_ext == ".parquet":
-                       df = pd.read_parquet(file_path, columns = columns)
-                   elif file_ext == ".xlsx" or file_ext == ".xls":
-                       if columns is not None:
-                           df = pd.read_excel(file_path)
-                           df = df[columns]
-                       else:
-                           df = pd.read_excel(file_path)
-                   else:
-                       raise ValueError(f"Unsupported file format: {file_ext}")
-            if df.empty:
-                raise ValueError("The loaded dataset is empty")
-            logger.info(f"Loaded {len(df)} rows and {len(df.columns)} columns")
-            return self._cache_and_return(df, cache_file, use_cache)
-
+                # Pandas with chunking for larger CSV files
+                if file_ext == ".csv":
+                    if os.path.getsize(file_path) > 1_000_000_000:  # 1GB
+                        logger.info(f"Large file detected ({file_path}), using chunked reading")
+                        chunks = pd.read_csv(file_path, chunksize=self.chunk_size, 
+                                                        usecols=columns_to_load,
+                                                        low_memory=low_memory, 
+                                                        dtype_backend='pyarrow',
+                                                        compression=compression)
+                        df = pd.concat(chunks, ignore_index=True)
+                    else:
+                        df = pd.read_csv(file_path, usecols=columns_to_load, 
+                                                 low_memory=low_memory, 
+                                                 dtype_backend="pyarrow",
+                                                 compression=compression)
+                elif file_ext == ".parquet":
+                    df = pd.read_parquet(file_path, columns=columns_to_load)
+                elif file_ext in (".xlsx", ".xls"):
+                    if is_gzip:
+                        logger.warning("Excel files with gzip compression are not directly supported. Attempting workaround...")
+                        # This would require additional handling like decompressing first
+                        # For now, raise an error
+                        raise ValueError("Excel files with gzip compression are not supported")
+                    
+                    if columns_to_load is not None:
+                        df = pd.read_excel(file_path)
+                        df = df[columns_to_load]
+                    else:
+                        df = pd.read_excel(file_path)
+                else:
+                    raise ValueError(f"Unsupported file format: {file_ext}")
+            
+            return self._preprocessing_steps(df, sample_size, cache_file, use_cache)
+            
         except Exception as e:
-            logger.error(f"Error loading data: {e}")
+            logger.error(f"Error processing Lending Club data: {e}")
             raise
+
+    def _preprocessing_steps(self, df:pd.DataFrame, sample_size:Optional[int], cache_file:str, use_cache:bool) -> pd.DataFrame:
+        """
+        Apply preprocessing steps to the loaded dataframe
+        
+        :param df:                  The loaded dataframe
+        :param sample_size:      Number of rows to sample
+        :param cache_file:        Path to cache file
+        :param use_cache:       Whether to use cache
+        :return:                     Preprocessed dataframe
+        """
+        # Take a sample if specified
+        if sample_size is not None and len(df) > sample_size:
+            logger.info(f"Sampling {sample_size} rows from dataset")
+            df = df.sample(n=sample_size, random_state=42)
+        
+        # Preprocessing specific to Lending Club data
+        logger.info("Preprocessing Lending Club data")
+        
+        # Convert interest rate from string to float
+        if 'int_rate' in df.columns:
+            try:
+                df['int_rate'] = df['int_rate'].str.replace('%', '').astype(float) / 100
+            except:
+                logger.warning("Could not convert int_rate. It may already be numeric or have different format.")
+        
+        # Convert term to numeric (e.g., " 36 months" → 36)
+        if 'term' in df.columns:
+            try:
+                df['term'] = df['term'].str.extract('(\d+)').astype(float)
+            except:
+                logger.warning("Could not convert term. It may already be numeric or have different format.")
+        
+        # Convert revolving utilization from string to float
+        if 'revol_util' in df.columns:
+            try:
+                df['revol_util'] = df['revol_util'].str.replace('%', '').astype(float) / 100
+            except:
+                logger.warning("Could not convert revol_util. It may already be numeric or have different format.")
+            
+        # Create average FICO score
+        if 'fico_range_low' in df.columns and 'fico_range_high' in df.columns:
+            df['fico_score'] = (df['fico_range_low'] + df['fico_range_high']) / 2
+            
+        # Calculate debt-to-payment ratio
+        if 'installment' in df.columns and 'annual_inc' in df.columns:
+            df['payment_to_income'] = (df['installment'] * 12) / df['annual_inc']
+            
+        # Create feature for payment efficiency
+        if 'total_pymnt' in df.columns and 'loan_amnt' in df.columns:
+            df['payment_ratio'] = df['total_pymnt'] / df['loan_amnt']
+            
+        # Create target variable for debt management strategy prediction
+        # 1 = high interest first strategy (good for high interest rate loans that were fully paid)
+        # 0 = low balance first (better for loans that struggled with payments)
+        if 'loan_status' in df.columns and 'int_rate' in df.columns:
+            high_interest = df['int_rate'] > df['int_rate'].median()
+            fully_paid = df['loan_status'] == 'Fully Paid'
+            df['target_column'] = np.where(high_interest & fully_paid, 1, 0)
+            logger.info(f"Created target variable with distribution: {df['target_column'].value_counts(normalize=True)}")
+            
+        # Drop rows with missing target or key features
+        if 'target_column' in df.columns:
+            initial_count = len(df)
+            essential_features = ['target_column', 'int_rate', 'loan_amnt', 'annual_inc', 'installment']
+            df = df.dropna(subset=[col for col in essential_features if col in df.columns])
+            logger.info(f"Removed {initial_count - len(df)} rows with missing essential values")
+            
+        # Validate the processed data
+        if df.empty:
+            raise ValueError("The processed dataset is empty")
+        
+        logger.info(f"Processed {len(df)} rows with {len(df.columns)} features")
+        
+        # Cache processed data for future use
+        return self._cache_and_return(df, cache_file, use_cache)
 
     @staticmethod
     def _cache_and_return(df:pd.DataFrame, cache_file:str, use_cache:bool) -> pd.DataFrame:
@@ -532,3 +660,4 @@ def apply_optimal_dtypes(df:pd.DataFrame) -> pd.DataFrame:
     """
     optimal_dtypes = get_optimal_dtypes(df)
     return df.astype(optimal_dtypes)
+
