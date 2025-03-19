@@ -98,54 +98,64 @@ class DataPreprocessor:
                                 df[col] = df[col].replace("[\$,]", " ", regex = True).astype("float")
                                 logger.info(f"Converted currency column '{col}' to float")
                             # Try standard numeric conversion
-                            elif pd.to_numeric(df[col], errors = "coerce").notna().all():
-                                   df[col] = pd.to_numeric(df[col], errors = "coerce")
-                                   logger.info(f"Converted column '{col}' to numeric")
+                            else:
+                                  df[col] = pd.to_numeric(df[col], errors = "ignore")
                       except Exception as e:
-                          pass
-            # Identify and handle datetime columns
-            for col in df.columns:
-                if df[col].dtype == "object":
-                    try:
-                          if pd.to_datetime(df[col], errors = "coerce").notna().all():
-                              df[col] = pd.to_datetime(df[col], errors = "coerce")
-                              logger.info(f"Converted column '{col}' to datetime")
-                              df[f"{col}_year"] = df[col].dt.year
-                              df[f"{col}_month"] = df[col].dt.month
-                              df[f"{col}_quarter"] = df[col].dt.quarter
-                              reference_date = pd.to_datetime("2000-01-01")
-                              df[f"days_since_{col}"] = (df[col] - reference_date).dt.days
-                    except Exception as e:
-                        logger.warning(f"Failed to convert column '{col}' to datetime: {e}")
-
-            numeric_cols = df.select_dtypes(include=["numbers"]).columns
-            for col in numeric_cols:
-                if target_column and col == target_column:
-                    continue
-                threshold = outlier_thresholds.get(col, self.outlier_threshold) if outlier_thresholds else self.outlier_threshold
-                z_scores = np.abs(stats.zscore(df[col], nan_policy="omit"))
-                outliers = (z_scores > threshold)
-                outlier_count = outliers.sum()
-                if outlier_count > 0:
-                    upper_limit = df[col].mean() + threshold * df[col].std()
-                    lower_limit = df[col].mean() - threshold * df[col].std()
-                    df[col] = df[col].clip(lower = lower_limit, upper = upper_limit)
-                    logger.info(f"Capped {outlier_count} outliers in column '{col}'")
-
+                            # Keep as object if conversion fails
+                            logger.warning(f"Could not convert column '{col}': {e}")
+            # Drop columns with more than missing_threshold missing values
             missing_pct = df.isnull().mean()
-            high_missing_cols =  missing_pct[missing_pct > missing_threshold].index.tolist()
+            high_missing_cols = missing_pct[missing_pct > missing_threshold].index.tolist()
             if high_missing_cols:
-                if target_column and target_column in high_missing_cols:
+                if target_column in high_missing_cols:
                     high_missing_cols.remove(target_column)
-                if high_missing_cols:
-                    df = df.drop(columns = high_missing_cols)
-                    logger.info(f"Dropped columns with >{missing_threshold*100}% missing values: {high_missing_cols}")
-
-            final_shape = df.shape
-            rows_removed =  initial_shape[0] - final_shape[0]
-            cols_removed = initial_shape[1] - final_shape[1]
-            logger.info(f"Data cleaning completed. Removed {rows_removed} rows and {cols_removed} columns")
-            logger.info(f"Final data shape: {final_shape}")
+                df = df.drop(columns = high_missing_cols)
+                logger.info(f"Dropped columns with >{missing_threshold:.0%} missing values: {high_missing_cols}")
+            # Fill Missing values based on data type
+            numeric_cols = df.select_dtypes(include=["number"]).columns
+            categorical_cols = df.select_dtypes(include=["object", "category"]).columns
+            # Impute missing numeric values with median
+            for col in numeric_cols:
+                if df[col].isnull().sum() > 0:
+                    # If it's target column and has missing values, we drop those rows
+                    if col == target_column:
+                        df = df.dropna(subset = [col])
+                        logger.info(f"Dropped {df[col].isnull().sum()} rows with missing target values")
+                    else:
+                        median_val = df[col].median()
+                        df[col] = df[col].fillna(median_val)
+                        logger.info(f"Filled {df[col].isnull().sum()} missing values in '{col}' with median ({median_val})")
+            # Impute missing categorical values with most frequent
+            for col in categorical_cols:
+                if df[col].isnull().sum() > 0:
+                    # If it's target column with missing values, drop those rows
+                    if col == target_column:
+                        df = df.dropna(subset = [col])
+                        logger.info(f"Dropped {df[col].isnull().sum()} rows with missing target values")
+                    else:
+                        mode_val = df[col].mode().iloc[0]
+                        df[col] = df[col].fillna(mode_val)
+                        logger.info(f"Filled {df[col].isnull().sum()} missing values in '{col}' with mode ({mode_val})")
+            # Handle outliers in numeric columns
+            for col in numeric_cols:
+                if col == target_column:
+                    continue  # Don't adjust the target column
+                # Get outlier threshold (default IQR method)
+                threshold = outlier_thresholds.get(col, 1.5) if outlier_thresholds else 1.5
+                q1 = df[col].quantile(0.25)
+                q3 = df[col].quantile(0.75)
+                iqr = q3 - q1
+                # Define upper and lower bounds
+                lower_bound = q1 - threshold * iqr
+                upper_bound = q3 + threshold * iqr
+                # Count outliers
+                outliers = ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
+                if outliers > 0:
+                    logger.info(f"Found {outliers} outliers in '{col}'")
+                    # Clip outliers to the boundaries
+                    df[col] = df[col].clip(lower = lower_bound, upper = upper_bound)
+                    logger.info(f"Clipped {outliers} outliers in '{col}' to [{lower_bound:.2f}, {upper_bound:.2f}]")
+            logger.info(f"Final Shape after cleaning: {df.shape}")
             return df
 
          def encode_categorical(self, data:pd.DataFrame, columns:Optional[List[str]] = None,
