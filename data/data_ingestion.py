@@ -225,8 +225,21 @@ class DataIngestion:
         # 1 = high interest first strategy (good for high interest rate loans that were fully paid)
         # 0 = low balance first (better for loans that struggled with payments)
         if 'loan_status' in df.columns and 'int_rate' in df.columns:
+            # Fill NaN values in int_rate with the median to avoid boolean ambiguity
+            if df['int_rate'].isna().any():
+                logger.warning(f"Filling {df['int_rate'].isna().sum()} NaN values in int_rate")
+                df['int_rate'] = df['int_rate'].fillna(df['int_rate'].median())
+            
+            # Convert loan_status to proper string type to ensure comparison works
+            if df['loan_status'].isna().any():
+                logger.warning(f"Filling {df['loan_status'].isna().sum()} NaN values in loan_status")
+                df['loan_status'] = df['loan_status'].fillna('Unknown')
+            
+            # Now create the boolean masks with no NaN values
             high_interest = df['int_rate'] > df['int_rate'].median()
             fully_paid = df['loan_status'] == 'Fully Paid'
+            
+            # Create target column
             df['target_column'] = np.where(high_interest & fully_paid, 1, 0)
             logger.info(f"Created target variable with distribution: {df['target_column'].value_counts(normalize=True)}")
             
@@ -236,7 +249,7 @@ class DataIngestion:
             essential_features = ['target_column', 'int_rate', 'loan_amnt', 'annual_inc', 'installment']
             df = df.dropna(subset=[col for col in essential_features if col in df.columns])
             logger.info(f"Removed {initial_count - len(df)} rows with missing essential values")
-            
+        
         # Validate the processed data
         if df.empty:
             raise ValueError("The processed dataset is empty")
