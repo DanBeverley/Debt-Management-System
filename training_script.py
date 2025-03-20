@@ -153,10 +153,40 @@ if preprocessed_data.isna().any().any():
     logging.info("Filling missing values...")
     preprocessed_data = preprocessed_data.fillna(preprocessed_data.mean())
 
-# Check target variable distribution
+# Check target variable distribution and add synthetic data if needed
 target_counts = preprocessed_data['target_column'].value_counts()
 logging.info(f"Target distribution: {target_counts}")
 
+# Check if we only have one unique value
+if len(target_counts) == 1:
+    logging.warning("⚠️ Target contains only one unique value. Creating synthetic data for the missing class.")
+    
+    existing_class = target_counts.index[0]
+    missing_class = 1 if existing_class == 0 else 0
+    logging.info(f"Existing class: {existing_class}, creating synthetic data for class: {missing_class}")
+    
+    # Create a copy of a few rows to make synthetic samples
+    num_synthetic = min(100, len(preprocessed_data))
+    synthetic_rows = preprocessed_data.sample(num_synthetic).copy()
+    
+    # Set the target to the missing class
+    synthetic_rows['target_column'] = missing_class
+    
+    # Add small random variations to make each row unique
+    numeric_features = synthetic_rows.drop('target_column', axis=1).columns
+    for col in numeric_features:
+        # Add random noise (±10% variation)
+        std = synthetic_rows[col].std() or 1.0  # Handle zero std
+        synthetic_rows[col] = synthetic_rows[col] + np.random.normal(0, std * 0.1, len(synthetic_rows))
+    
+    # Combine with original data
+    logging.info(f"Adding {num_synthetic} synthetic samples for class {missing_class}")
+    preprocessed_data = pd.concat([preprocessed_data, synthetic_rows])
+    
+    # Show new distribution
+    logging.info(f"New target distribution: {preprocessed_data['target_column'].value_counts()}")
+
+# Original imbalance check can stay as is
 if len(target_counts) >= 2 and (target_counts.min() / target_counts.max() < 0.2):
     logging.info(f"Class imbalance detected. Original distribution {target_counts}")
 
