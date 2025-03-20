@@ -12,9 +12,23 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Union, Optional
 from sklearn.base import BaseEstimator
-import tensorflow as tf
 
+# Fix the TensorFlow import to handle both older and newer versions
+try:
+    import tensorflow as tf
+except ImportError:
+    tf = None
+
+# If keras is not directly in tensorflow, try importing it separately
+if tf is not None and not hasattr(tf, 'keras'):
+    try:
+        import keras
+        tf.keras = keras
+    except ImportError:
+        logging.warning("Could not import keras. Neural network models will not be available.")
+        
 from data.data_processing import DataPreprocessor
+from sklearn.preprocessing import StandardScaler
 
 logging.basicConfig(level = logging.INFO, format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                     handlers = [logging.FileHandler('model_prediction.log'),
@@ -22,12 +36,13 @@ logging.basicConfig(level = logging.INFO, format = "%(asctime)s - %(name)s - %(l
 logger = logging.getLogger(__name__)
 
 class ModelPredictor:
-    def __init__(self, model_path:str, config:Optional[Dict] = None):
+    def __init__(self, model_path:str, preprocessor_path:str, config:Optional[Dict] = None):
         self.model_path = model_path
+        self.preprocessor_path = preprocessor_path
         self.config = config or {}
         # Load the trained model
         self.model = self._load_model(model_path)
-        self.data_preprocessor = DataPreprocessor(config = self.config)
+        self.data_preprocessor = joblib.load(preprocessor_path)
 
     def _load_model(self, model_path:str) -> Union[BaseEstimator, tf.keras.Model]:
         """
