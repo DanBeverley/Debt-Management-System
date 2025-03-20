@@ -23,7 +23,6 @@ The project consists of several components:
 - **SMOTE** (Synthetic Minority Over-sampling Technique) for handling class imbalance
 - **Hyperparameter Optimization** using grid search or Bayesian optimization
 - **Flask** for the web application backend
-- **Bootstrap** for responsive UI design
 
 ## Model Performance
 
@@ -136,11 +135,3 @@ Example for full production training:
 ```bash
 python training_script.py --sample_size 0 --use_ensemble --tune_hyperparameters --data_path "path/to/dataset.csv"
 ```
-
-## License
-
-[Your license information here]
-
-## Contributors
-
-[Your name and contributors]
